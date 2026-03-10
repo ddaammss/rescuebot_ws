@@ -58,11 +58,11 @@ class AnalyzerConfig:
     leaning_shoulder_tilt_deg: float = 25.0
     collapsed_shoulder_tilt_deg: float = 45.0
 
-    # head_down_score는 0~1 범위를 갖는 값이다.
+    # head_drop_ratio는 0~1 범위를 갖는 값이다.
     # 0.0에 가까울수록 얼굴이 어깨보다 충분히 위에 있다.
     # 1.0에 가까울수록 얼굴이 어깨에 가까워지거나 아래로 내려온 상태다.
-    leaning_head_down_score: float = 0.55
-    collapsed_head_down_score: float = 0.78
+    leaning_head_drop_ratio: float = 0.55
+    collapsed_head_drop_ratio: float = 0.78
 
     # 전신이 보일 때만 사용하는 torso / lying 관련 기준
     collapsed_torso_angle_deg: float = 60.0
@@ -237,7 +237,7 @@ class PoseSeverityEngine:
     # ------------------------------------------------------------------
     # 1) 관측 상태 분류
     # ------------------------------------------------------------------
-    def _classify_observation(
+    def _classify_visibility(
         self,
         keypoints: np.ndarray,
         kp_conf: np.ndarray,
@@ -285,7 +285,7 @@ class PoseSeverityEngine:
         keypoints: np.ndarray,
         kp_conf: np.ndarray,
         box: np.ndarray,
-        obs: str,
+        visibility: str,
         shape: Tuple[int, int, int],
     ) -> Tuple[str, float, float, float]:
         """자세를 분류하고, 디버깅에 필요한 수치도 함께 반환한다.
@@ -293,7 +293,7 @@ class PoseSeverityEngine:
         반환값:
         - posture: NORMAL / LEANING / COLLAPSED / LYING / UNKNOWN
         - shoulder_tilt: 어깨 기울기 각도
-        - head_down_score: 얼굴-어깨 상대 거리 기반 고개 숙임 점수
+        - head_drop_ratio: 얼굴-어깨 상대 거리 기반 고개 숙임 점수
         - torso_angle: 어깨-골반 축의 기울기 각도 (전신일 때 의미 있음)
         """
         x1, y1, x2, y2 = box.astype(float)
@@ -311,8 +311,8 @@ class PoseSeverityEngine:
         rs = self._get_point(keypoints, kp_conf, 6, shape)
 
         # 전신일 때만 hip를 posture 계산에 사용한다.
-        lh = self._get_point(keypoints, kp_conf, 11, shape) if obs == "FULL_BODY" else None
-        rh = self._get_point(keypoints, kp_conf, 12, shape) if obs == "FULL_BODY" else None
+        lh = self._get_point(keypoints, kp_conf, 11, shape) if visibility == "FULL_BODY" else None
+        rh = self._get_point(keypoints, kp_conf, 12, shape) if visibility == "FULL_BODY" else None
 
         shoulder_center = self._safe_mean([ls, rs])
         hip_center = self._safe_mean([lh, rh])
@@ -328,15 +328,15 @@ class PoseSeverityEngine:
         if shoulder_span < bw * self.cfg.upper_body_min_shoulder_span_ratio:
             shoulder_tilt = 0.0
 
-        # head_down_score 계산
+        # head_drop_ratio 계산
         # - 기존 head_drop처럼 "얼굴이 어깨 아래로 내려가야" 커지는 방식이 아님
         # - 얼굴이 어깨에 얼마나 가까워졌는지를 0~1 점수로 만든다.
         #   * 얼굴이 충분히 위에 있으면 0에 가까움
         #   * 얼굴이 어깨에 가까워질수록 1에 가까움
-        head_down_score = 0.0
+        head_drop_ratio = 0.0
         if face_anchor is not None and shoulder_center is not None and shoulder_span > 1.0:
             head_gap = max(float(shoulder_center[1] - face_anchor[1]), 0.0)
-            head_down_score = 1.0 - min(head_gap / shoulder_span, 1.0)
+            head_drop_ratio = 1.0 - min(head_gap / shoulder_span, 1.0)
 
         torso_angle = 0.0
         if shoulder_center is not None and hip_center is not None:
@@ -346,49 +346,49 @@ class PoseSeverityEngine:
         # ------------------------------
         # FULL_BODY posture rule
         # ------------------------------
-        if obs == "FULL_BODY":
+        if visibility == "FULL_BODY":
             # 누움: bbox가 가로로 눕거나, torso가 거의 수평에 가깝게 누운 경우
             if aspect >= self.cfg.lying_aspect_ratio or torso_angle >= self.cfg.lying_torso_angle_deg:
-                return "LYING", shoulder_tilt, head_down_score, torso_angle
+                return "LYING", shoulder_tilt, head_drop_ratio, torso_angle
 
             # 붕괴: torso / shoulder tilt / head down 중 하나가 충분히 큰 경우
             if (
                 torso_angle >= self.cfg.collapsed_torso_angle_deg
                 or shoulder_tilt >= self.cfg.collapsed_shoulder_tilt_deg
-                or head_down_score >= self.cfg.collapsed_head_down_score
+                or head_drop_ratio >= self.cfg.collapsed_head_drop_ratio
             ):
-                return "COLLAPSED", shoulder_tilt, head_down_score, torso_angle
+                return "COLLAPSED", shoulder_tilt, head_drop_ratio, torso_angle
 
             # 기울어짐: 위 collapsed는 아니지만, shoulder tilt 또는 head_down이 어느 정도 큰 경우
             if (
                 shoulder_tilt >= self.cfg.leaning_shoulder_tilt_deg
-                or head_down_score >= self.cfg.leaning_head_down_score
+                or head_drop_ratio >= self.cfg.leaning_head_drop_ratio
             ):
-                return "LEANING", shoulder_tilt, head_down_score, torso_angle
+                return "LEANING", shoulder_tilt, head_drop_ratio, torso_angle
 
-            return "NORMAL", shoulder_tilt, head_down_score, torso_angle
+            return "NORMAL", shoulder_tilt, head_drop_ratio, torso_angle
 
         # ------------------------------
         # UPPER_BODY posture rule
         # ------------------------------
-        if obs == "UPPER_BODY":
+        if visibility == "UPPER_BODY":
             # 상반신은 단순 규칙:
-            # - shoulder tilt 또는 head_down_score 중 큰 쪽을 기준으로 posture 판정
+            # - shoulder tilt 또는 head_drop_ratio 중 큰 쪽을 기준으로 posture 판정
             if (
                 shoulder_tilt >= self.cfg.collapsed_shoulder_tilt_deg
-                or head_down_score >= self.cfg.collapsed_head_down_score
+                or head_drop_ratio >= self.cfg.collapsed_head_drop_ratio
             ):
-                return "COLLAPSED", shoulder_tilt, head_down_score, torso_angle
+                return "COLLAPSED", shoulder_tilt, head_drop_ratio, torso_angle
 
             if (
                 shoulder_tilt >= self.cfg.leaning_shoulder_tilt_deg
-                or head_down_score >= self.cfg.leaning_head_down_score
+                or head_drop_ratio >= self.cfg.leaning_head_drop_ratio
             ):
-                return "LEANING", shoulder_tilt, head_down_score, torso_angle
+                return "LEANING", shoulder_tilt, head_drop_ratio, torso_angle
 
-            return "NORMAL", shoulder_tilt, head_down_score, torso_angle
+            return "NORMAL", shoulder_tilt, head_drop_ratio, torso_angle
 
-        return "UNKNOWN", shoulder_tilt, head_down_score, torso_angle
+        return "UNKNOWN", shoulder_tilt, head_drop_ratio, torso_angle
 
     # ------------------------------------------------------------------
     # 3) 움직임 계산 / 분류
@@ -455,11 +455,11 @@ class PoseSeverityEngine:
     # 4) 보조 판정
     # ------------------------------------------------------------------
     @staticmethod
-    def _possible_trapped(obs: str, posture: str, motion: str) -> bool:
+    def _possible_trapped(visibility: str, posture: str, motion: str) -> bool:
         """부분 노출/무움직임 등을 바탕으로 매몰 의심 여부를 계산한다."""
-        if obs == "PARTIAL" and motion in ("LOCAL_ONLY", "NONE"):
+        if visibility == "PARTIAL" and motion in ("LOCAL_ONLY", "NONE"):
             return True
-        if obs == "UPPER_BODY" and posture == "COLLAPSED" and motion == "NONE":
+        if visibility == "UPPER_BODY" and posture == "COLLAPSED" and motion == "NONE":
             return True
         return False
 
@@ -467,7 +467,7 @@ class PoseSeverityEngine:
         """전체 관측 시간과 현재 상태 지속 시간을 계산한다.
 
         - seen_sec : 이 사람을 처음 본 이후 경과 시간
-        - state_sec: 현재 (obs/posture/motion/trapped) 조합이 유지된 시간
+        - state_sec: 현재 (visibility/posture/motion/trapped) 조합이 유지된 시간
         """
         hist = self.history.setdefault(track_id, self._new_track_state())
         now = time.time()
@@ -481,7 +481,7 @@ class PoseSeverityEngine:
     # ------------------------------------------------------------------
     def _decide(
         self,
-        obs: str,
+        visibility: str,
         posture: str,
         motion: str,
         trapped: bool,
@@ -492,7 +492,7 @@ class PoseSeverityEngine:
         if seen_sec < self.cfg.analyzing_sec:
             return "ANALYZING"
 
-        if obs == "FULL_BODY":
+        if visibility == "FULL_BODY":
             if posture in ("LYING", "COLLAPSED") and motion == "NONE" and state_sec >= self.cfg.critical_sec:
                 return "CRITICAL"
             if posture in ("LYING", "COLLAPSED") and motion in ("LOW", "NONE") and state_sec >= self.cfg.warning_sec:
@@ -505,14 +505,14 @@ class PoseSeverityEngine:
                 return "CAUTION"
             return "NORMAL"
 
-        if obs == "UPPER_BODY":
+        if visibility == "UPPER_BODY":
             if posture == "COLLAPSED" and motion == "NONE" and state_sec >= self.cfg.warning_sec:
                 return "WARNING"
             if motion in ("LOW", "NONE") and state_sec >= self.cfg.caution_sec:
                 return "CAUTION"
             return "NORMAL"
 
-        if obs == "PARTIAL":
+        if visibility == "PARTIAL":
             if trapped and motion == "NONE" and state_sec >= self.cfg.critical_sec:
                 return "WARNING"
             if motion in ("LOW", "NONE") and state_sec >= self.cfg.caution_sec:
@@ -529,7 +529,7 @@ class PoseSeverityEngine:
         frame: np.ndarray,
         keypoints: np.ndarray,
         kp_conf: np.ndarray,
-        obs: str,
+        visibility: str,
         color: Tuple[int, int, int],
     ) -> None:
         """관측 상태에 맞춰 skeleton과 keypoint를 그린다.
@@ -541,8 +541,8 @@ class PoseSeverityEngine:
             return
 
         h, w = frame.shape[:2]
-        links = self.FULL_LINKS if obs == "FULL_BODY" else self.UPPER_LINKS
-        draw_ids = set(self.UPPER_IDS + self.LOWER_IDS) if obs == "FULL_BODY" else set(self.UPPER_IDS)
+        links = self.FULL_LINKS if visibility == "FULL_BODY" else self.UPPER_LINKS
+        draw_ids = set(self.UPPER_IDS + self.LOWER_IDS) if visibility == "FULL_BODY" else set(self.UPPER_IDS)
 
         for a, b in links:
             pa, pb = keypoints[a], keypoints[b]
@@ -563,7 +563,7 @@ class PoseSeverityEngine:
     def _pack_result(
         track_id: int,
         bbox: Tuple[int, int, int, int],
-        obs: str,
+        visibility: str,
         posture: str,
         motion: str,
         severity: str,
@@ -571,7 +571,7 @@ class PoseSeverityEngine:
         seen_sec: float,
         state_sec: float,
         shoulder_tilt: float,
-        head_down_score: float,
+        head_drop_ratio: float,
         torso_angle: float,
         motion_smooth: float,
         motion_upper: float,
@@ -581,7 +581,7 @@ class PoseSeverityEngine:
         return {
             "track_id": int(track_id),
             "bbox": [int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])],
-            "observation": obs,
+            "observation": visibility,
             "posture": posture,
             "motion": motion,
             "severity": severity,
@@ -589,7 +589,7 @@ class PoseSeverityEngine:
             "seen_sec": round(float(seen_sec), 3),
             "state_sec": round(float(state_sec), 3),
             "shoulder_tilt": round(float(shoulder_tilt), 3),
-            "head_down_score": round(float(head_down_score), 3),
+            "head_drop_ratio": round(float(head_drop_ratio), 3),
             "torso_angle": round(float(torso_angle), 3),
             "motion_smooth": round(float(motion_smooth), 5),
             "motion_upper": round(float(motion_upper), 5),
@@ -635,11 +635,11 @@ class PoseSeverityEngine:
             clipped_box = np.array([x1, y1, x2, y2], dtype=np.float32)
 
             # 1) observation
-            obs = self._classify_observation(kps, kp_conf, frame.shape)
+            visibility = self._classify_visibility(kps, kp_conf, frame.shape)
 
             # 2) posture
-            posture, shoulder_tilt, head_down_score, torso_angle = self._classify_posture(
-                kps, kp_conf, clipped_box, obs, frame.shape
+            posture, shoulder_tilt, head_drop_ratio, torso_angle = self._classify_posture(
+                kps, kp_conf, clipped_box, visibility, frame.shape
             )
 
             # 3) motion
@@ -647,21 +647,21 @@ class PoseSeverityEngine:
             motion = self._classify_motion(smooth, upper, core)
 
             # 4) trapped / time / severity
-            trapped = self._possible_trapped(obs, posture, motion)
-            signature = f"{obs}|{posture}|{motion}|{trapped}"
+            trapped = self._possible_trapped(visibility, posture, motion)
+            signature = f"{visibility}|{posture}|{motion}|{trapped}"
             seen_sec, state_sec = self._state_duration(track_id, signature)
-            severity = self._decide(obs, posture, motion, trapped, seen_sec, state_sec)
+            severity = self._decide(visibility, posture, motion, trapped, seen_sec, state_sec)
 
             # 5) visualization
             color = self.COLORS[severity]
-            self._draw_skeleton(annotated, kps, kp_conf, obs, color)
+            self._draw_skeleton(annotated, kps, kp_conf, visibility, color)
 
             if self.cfg.draw_box:
                 cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
 
             line1 = f"ID {track_id} | {severity}"
-            line2 = f"{obs} | {posture} | {motion}"
-            line3 = f"tilt:{shoulder_tilt:.1f} hds:{head_down_score:.2f} m:{smooth:.3f}"
+            line2 = f"{visibility} | {posture} | {motion}"
+            line3 = f"tilt:{shoulder_tilt:.1f} hds:{head_drop_ratio:.2f} m:{smooth:.3f}"
 
             ty = max(20, y1 - 10)
             cv2.putText(annotated, line1, (x1, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
@@ -692,7 +692,7 @@ class PoseSeverityEngine:
                 self._pack_result(
                     track_id=track_id,
                     bbox=(x1, y1, x2, y2),
-                    obs=obs,
+                    visibility=visibility,
                     posture=posture,
                     motion=motion,
                     severity=severity,
@@ -700,7 +700,7 @@ class PoseSeverityEngine:
                     seen_sec=seen_sec,
                     state_sec=state_sec,
                     shoulder_tilt=shoulder_tilt,
-                    head_down_score=head_down_score,
+                    head_drop_ratio=head_drop_ratio,
                     torso_angle=torso_angle,
                     motion_smooth=smooth,
                     motion_upper=upper,

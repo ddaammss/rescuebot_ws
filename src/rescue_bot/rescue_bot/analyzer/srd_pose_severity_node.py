@@ -37,7 +37,7 @@ class SrdPoseSeverityNode(Node):
 
     발행 토픽:
     - result_topic (String JSON)
-    - annotated_topic (CompressedImage)
+    - image_result_topic (CompressedImage)
     """
 
     def __init__(self):
@@ -51,14 +51,14 @@ class SrdPoseSeverityNode(Node):
         self.declare_parameter("input_image_topic", "/camera/image_raw/compressed")
         # 최종 severity 문자열 publish 토픽
         self.declare_parameter("severity_topic", "/robot6/srd/severity")
-        self.declare_parameter("annotated_topic", "/robot6/srd/annotated/compressed")
+        self.declare_parameter("image_result_topic", "/robot6/srd/image_result/compressed")
         self.declare_parameter("publish_annotated", True)
         self.declare_parameter("show_debug", True)
 
         model_path = self.get_parameter("model_path").get_parameter_value().string_value
         input_image_topic = self.get_parameter("input_image_topic").get_parameter_value().string_value
         severity_topic = self.get_parameter("severity_topic").get_parameter_value().string_value
-        annotated_topic = self.get_parameter("annotated_topic").get_parameter_value().string_value
+        image_result_topic = self.get_parameter("image_result_topic").get_parameter_value().string_value
         self.publish_annotated = self.get_parameter("publish_annotated").get_parameter_value().bool_value
         show_debug = self.get_parameter("show_debug").get_parameter_value().bool_value
 
@@ -72,7 +72,7 @@ class SrdPoseSeverityNode(Node):
         # Publisher / Subscriber 생성
         # --------------------------------------------------------------
         self.severity_pub = self.create_publisher(String, severity_topic, 10)
-        self.annotated_pub = self.create_publisher(CompressedImage, annotated_topic, 10)
+        self.image_result_pub = self.create_publisher(CompressedImage, image_result_topic, 10)
 
         self.image_sub = self.create_subscription(
             CompressedImage,
@@ -82,7 +82,7 @@ class SrdPoseSeverityNode(Node):
         )
 
         self.get_logger().info(
-            f"SRD Pose Severity Node started. input={input_image_topic}, severity={severity_topic}, annotated={annotated_topic}"
+            f"SRD Pose Severity Node started. input={input_image_topic}, severity={severity_topic}, annotated={image_result_topic}"
         )
 
     # ------------------------------------------------------------------
@@ -132,7 +132,7 @@ class SrdPoseSeverityNode(Node):
             # 4) 필요 시 annotated image도 compressed로 발행
             if self.publish_annotated:
                 annotated_msg = self._encode_compressed_image(annotated, msg.header.stamp)
-                self.annotated_pub.publish(annotated_msg)
+                self.image_result_pub.publish(annotated_msg)
 
         except Exception as exc:
             self.get_logger().error(f"image_callback failed: {exc}")
