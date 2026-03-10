@@ -80,7 +80,7 @@ class AnalyzerConfig:
     motion_active_upper: float = 0.030   # 상체 움직임이 이 값 이상이면 ACTIVE
     motion_local_only_upper: float = 0.020
     motion_local_only_core: float = 0.010
-    motion_low: float = 0.010            # ACTIVE 미만이지만 이 값 이상이면 LOW
+    motion_low: float = 0.015            # ACTIVE 미만이지만 이 값 이상이면 LOW
 
     # ---------------------------------------------------------------------
     # 상태 지속 시간 기준
