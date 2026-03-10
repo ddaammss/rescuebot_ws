@@ -497,8 +497,10 @@ class PoseSeverityEngine:
                 return "CRITICAL"
             if posture in ("LYING", "COLLAPSED") and motion in ("LOW", "NONE") and state_sec >= self.cfg.warning_sec:
                 return "WARNING"
-            if (posture == "LEANING" and motion == "NONE" and state_sec >= self.cfg.caution_sec) or (
-                posture == "NORMAL" and motion == "NONE" and state_sec >= self.cfg.warning_sec
+            if (
+                (posture == "LEANING" and motion in ("LOW", "NONE") and state_sec >= self.cfg.caution_sec)
+                or (posture == "NORMAL" and motion == "NONE" and state_sec >= self.cfg.warning_sec)
+                or (motion == "LOW" and state_sec >= self.cfg.caution_sec)
             ):
                 return "CAUTION"
             return "NORMAL"
