@@ -1,4 +1,4 @@
-# v0.600
+# v0.610
 """
 SRD Pose Severity ROS2 Node
 ===========================
@@ -9,13 +9,11 @@ SRD Pose Severity ROS2 Node
 1) compressed image 토픽을 구독한다.
 2) JPEG 이미지를 OpenCV 프레임으로 디코딩한다.
 3) PoseSeverityEngine을 호출한다.
-4) 분석 결과(JSON)와 시각화 이미지(compressed)를 publish 한다.
+4) 분석 결과(단일 severity string)와 시각화 이미지(compressed)를 publish 한다.
 
 즉, 이 파일은 ROS2 입출력 담당이고,
 실제 포즈 분석 로직 자체는 srd_pose_severity_core.py 에 있다.
 """
-
-import json
 from typing import List
 
 import cv2
@@ -51,14 +49,15 @@ class SrdPoseSeverityNode(Node):
         # --------------------------------------------------------------
         self.declare_parameter("model_path", "yolo11n-pose.pt")
         self.declare_parameter("input_image_topic", "/camera/image_raw/compressed")
-        self.declare_parameter("result_topic", "/srd/result_json")
+        # 최종 severity 문자열 publish 토픽
+        self.declare_parameter("severity_topic", "/robot6/srd/severity")
         self.declare_parameter("annotated_topic", "/srd/annotated/compressed")
         self.declare_parameter("publish_annotated", True)
         self.declare_parameter("show_debug", True)
 
         model_path = self.get_parameter("model_path").get_parameter_value().string_value
         input_image_topic = self.get_parameter("input_image_topic").get_parameter_value().string_value
-        result_topic = self.get_parameter("result_topic").get_parameter_value().string_value
+        severity_topic = self.get_parameter("severity_topic").get_parameter_value().string_value
         annotated_topic = self.get_parameter("annotated_topic").get_parameter_value().string_value
         self.publish_annotated = self.get_parameter("publish_annotated").get_parameter_value().bool_value
         show_debug = self.get_parameter("show_debug").get_parameter_value().bool_value
@@ -72,7 +71,7 @@ class SrdPoseSeverityNode(Node):
         # --------------------------------------------------------------
         # Publisher / Subscriber 생성
         # --------------------------------------------------------------
-        self.result_pub = self.create_publisher(String, result_topic, 10)
+        self.severity_pub = self.create_publisher(String, severity_topic, 10)
         self.annotated_pub = self.create_publisher(CompressedImage, annotated_topic, 10)
 
         self.image_sub = self.create_subscription(
@@ -83,7 +82,7 @@ class SrdPoseSeverityNode(Node):
         )
 
         self.get_logger().info(
-            f"SRD Pose Severity Node started. input={input_image_topic}, result={result_topic}, annotated={annotated_topic}"
+            f"SRD Pose Severity Node started. input={input_image_topic}, severity={severity_topic}, annotated={annotated_topic}"
         )
 
     # ------------------------------------------------------------------
@@ -112,16 +111,6 @@ class SrdPoseSeverityNode(Node):
         return msg
 
     # ------------------------------------------------------------------
-    # 결과 publish 보조 함수
-    # ------------------------------------------------------------------
-    def _publish_result_json(self, results: List[dict]) -> None:
-        """분석 결과 리스트를 JSON 문자열로 발행한다."""
-        payload = {"detections": results}
-        msg = String()
-        msg.data = json.dumps(payload, ensure_ascii=False)
-        self.result_pub.publish(msg)
-
-    # ------------------------------------------------------------------
     # 메인 callback
     # ------------------------------------------------------------------
     def image_callback(self, msg: CompressedImage) -> None:
@@ -131,10 +120,14 @@ class SrdPoseSeverityNode(Node):
             frame = self._decode_compressed_image(msg)
 
             # 2) 분석 코어 호출
-            annotated, results = self.engine.analyze_frame_with_results(frame)
+            annotated, severity = self.engine.analyze_frame_with_severity(frame)
 
-            # 3) 결과 JSON 발행
-            self._publish_result_json(results)
+            # 3) 최종 severity 하나만 publish
+            # 사람이 검출되지 않은 프레임은 운영 의미가 약하므로 publish 생략
+            if severity is not None:
+                sev_msg = String()
+                sev_msg.data = severity
+                self.severity_pub.publish(sev_msg)
 
             # 4) 필요 시 annotated image도 compressed로 발행
             if self.publish_annotated:
