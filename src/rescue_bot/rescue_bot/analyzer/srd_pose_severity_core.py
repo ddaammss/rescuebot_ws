@@ -1,4 +1,4 @@
-# v0.600
+# v0.610
 """
 SRD Pose Severity Core
 ======================
@@ -133,6 +133,15 @@ class PoseSeverityEngine:
         "CAUTION": (0, 220, 255),
         "WARNING": (0, 140, 255),
         "CRITICAL": (0, 0, 255),
+    }
+
+    # severity 우선순위. 여러 사람이 잡히더라도 가장 높은 위험도를 대표값으로 사용.
+    SEVERITY_PRIORITY = {
+        "CRITICAL": 4,
+        "WARNING": 3,
+        "CAUTION": 2,
+        "NORMAL": 1,
+        "ANALYZING": 0,
     }
 
     def __init__(self, config: Optional[AnalyzerConfig] = None):
@@ -711,3 +720,30 @@ class PoseSeverityEngine:
         ROS2 String topic, 로깅, 디버깅 용도로 사용 가능하다.
         """
         return json.dumps({"detections": results}, ensure_ascii=False)
+
+    def extract_frame_severity(self, results_list: List[dict]) -> Optional[str]:
+        """
+        프레임 단위 최종 severity 하나를 만든다.
+        현재 시나리오는 한 화면 1명 전제지만, 혹시 여러 개가 잡혀도
+        가장 높은 severity를 대표값으로 사용한다.
+
+        사람이 없으면 None 반환.
+        """
+        if not results_list:
+            return None
+
+        return max(
+            (r["severity"] for r in results_list),
+            key=lambda x: self.SEVERITY_PRIORITY.get(x, -1),
+        )
+
+    def analyze_frame_with_severity(self, frame: np.ndarray):
+        """
+        ROS2 노드에서 쓰기 쉽게
+        1) 시각화 프레임
+        2) 프레임 대표 severity 하나
+        를 반환한다.
+        """
+        annotated, results_list = self.analyze_frame_with_results(frame)
+        severity = self.extract_frame_severity(results_list)
+        return annotated, severity
