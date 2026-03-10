@@ -506,18 +506,18 @@ class PoseSeverityEngine:
             return "NORMAL"
 
         if obs == "UPPER_BODY":
-            if motion in ("ACTIVE", "LOCAL_ONLY"):
-                return "NORMAL"
             if posture == "COLLAPSED" and motion == "NONE" and state_sec >= self.cfg.warning_sec:
                 return "WARNING"
-            return "CAUTION"
+            if motion in ("LOW", "NONE") and state_sec >= self.cfg.caution_sec:
+                return "CAUTION"
+            return "NORMAL"
 
         if obs == "PARTIAL":
-            if motion in ("ACTIVE", "LOCAL_ONLY"):
-                return "NORMAL"
             if trapped and motion == "NONE" and state_sec >= self.cfg.critical_sec:
                 return "WARNING"
-            return "CAUTION"
+            if motion in ("LOW", "NONE") and state_sec >= self.cfg.caution_sec:
+                return "CAUTION"
+            return "NORMAL"
 
         return "CAUTION"
 
