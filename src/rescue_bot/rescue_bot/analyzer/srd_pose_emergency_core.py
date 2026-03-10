@@ -1,6 +1,6 @@
 # v0.610
 """
-SRD Pose Severity Core
+SRD Pose EmergencyLevel Core
 ======================
 
 이 파일은 ROS2 의존성이 없는 "분석 엔진" 파일이다.
@@ -98,7 +98,7 @@ class AnalyzerConfig:
     draw_box: bool = True                # bbox 시각화 여부
 
 
-class PoseSeverityEngine:
+class PoseEmergencyEngine:
     """사람 포즈 기반 상태 판정 엔진.
 
     이 클래스는 다음 역할을 담당한다.
@@ -107,7 +107,7 @@ class PoseSeverityEngine:
     3) 관측 상태(FULL_BODY / UPPER_BODY / PARTIAL / LOW_CONF) 분류
     4) 자세(NORMAL / LEANING / COLLAPSED / LYING / UNKNOWN) 분류
     5) 움직임(ACTIVE / LOCAL_ONLY / LOW / NONE) 계산
-    6) 시간 지속성을 반영한 최종 severity 결정
+    6) 시간 지속성을 반영한 최종 emergency_level 결정
     7) annotated frame 및 structured result 생성
     """
 
@@ -126,7 +126,7 @@ class PoseSeverityEngine:
         (12, 14), (14, 16),
     ]
 
-    # severity 시각화 색상(BGR)
+    # emergency_level 시각화 색상(BGR)
     COLORS = {
         "ANALYZING": (255, 255, 255),
         "NORMAL": (0, 200, 0),
@@ -135,8 +135,8 @@ class PoseSeverityEngine:
         "CRITICAL": (0, 0, 255),
     }
 
-    # severity 우선순위. 여러 사람이 잡히더라도 가장 높은 위험도를 대표값으로 사용.
-    SEVERITY_PRIORITY = {
+    # emergency_level 우선순위. 여러 사람이 잡히더라도 가장 높은 위험도를 대표값으로 사용.
+    EMERGENCY_PRIORITY = {
         "CRITICAL": 4,
         "WARNING": 3,
         "CAUTION": 2,
@@ -477,7 +477,7 @@ class PoseSeverityEngine:
         return now - hist["first_seen"], now - hist["state_since"]
 
     # ------------------------------------------------------------------
-    # 5) 최종 severity 결정
+    # 5) 최종 emergency_level 결정
     # ------------------------------------------------------------------
     def _decide(
         self,
@@ -566,7 +566,7 @@ class PoseSeverityEngine:
         visibility: str,
         posture: str,
         motion: str,
-        severity: str,
+        emergency_level: str,
         trapped: bool,
         seen_sec: float,
         state_sec: float,
@@ -584,7 +584,7 @@ class PoseSeverityEngine:
             "observation": visibility,
             "posture": posture,
             "motion": motion,
-            "severity": severity,
+            "emergency_level": emergency_level,
             "trapped": bool(trapped),
             "seen_sec": round(float(seen_sec), 3),
             "state_sec": round(float(state_sec), 3),
@@ -646,20 +646,20 @@ class PoseSeverityEngine:
             smooth, upper, core = self._motion_value(track_id, kps, kp_conf, clipped_box, frame.shape)
             motion = self._classify_motion(smooth, upper, core)
 
-            # 4) trapped / time / severity
+            # 4) trapped / time / emergency_level
             trapped = self._possible_trapped(visibility, posture, motion)
             signature = f"{visibility}|{posture}|{motion}|{trapped}"
             seen_sec, state_sec = self._state_duration(track_id, signature)
-            severity = self._decide(visibility, posture, motion, trapped, seen_sec, state_sec)
+            emergency_level = self._decide(visibility, posture, motion, trapped, seen_sec, state_sec)
 
             # 5) visualization
-            color = self.COLORS[severity]
+            color = self.COLORS[emergency_level]
             self._draw_skeleton(annotated, kps, kp_conf, visibility, color)
 
             if self.cfg.draw_box:
                 cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
 
-            line1 = f"ID {track_id} | {severity}"
+            line1 = f"ID {track_id} | {emergency_level}"
             line2 = f"{visibility} | {posture} | {motion}"
             line3 = f"tilt:{shoulder_tilt:.1f} hds:{head_drop_ratio:.2f} m:{smooth:.3f}"
 
@@ -695,7 +695,7 @@ class PoseSeverityEngine:
                     visibility=visibility,
                     posture=posture,
                     motion=motion,
-                    severity=severity,
+                    emergency_level=emergency_level,
                     trapped=trapped,
                     seen_sec=seen_sec,
                     state_sec=state_sec,
@@ -723,9 +723,9 @@ class PoseSeverityEngine:
         """
         return json.dumps({"detections": results}, ensure_ascii=False)
 
-    def extract_frame_severity(self, results_list: List[dict]) -> Optional[str]:
+    def extract_frame_emergency_level(self, results_list: List[dict]) -> Optional[str]:
         """
-        프레임 단위 최종 severity 하나를 만든다.
+        프레임 단위 최종 emergency_level 하나를 만든다.
         현재 시나리오는 한 화면 1명 전제지만, 혹시 여러 개가 잡혀도
         가장 높은 severity를 대표값으로 사용한다.
 
@@ -735,17 +735,17 @@ class PoseSeverityEngine:
             return None
 
         return max(
-            (r["severity"] for r in results_list),
-            key=lambda x: self.SEVERITY_PRIORITY.get(x, -1),
+            (r["emergency_level"] for r in results_list),
+            key=lambda x: self.EMERGENCY_PRIORITY.get(x, -1),
         )
 
-    def analyze_frame_with_severity(self, frame: np.ndarray):
+    def analyze_frame_with_emergency_level(self, frame: np.ndarray):
         """
         ROS2 노드에서 쓰기 쉽게
         1) 시각화 프레임
-        2) 프레임 대표 severity 하나
+        2) 프레임 대표 emergency_level 하나
         를 반환한다.
         """
         annotated, results_list = self.analyze_frame_with_results(frame)
-        severity = self.extract_frame_severity(results_list)
-        return annotated, severity
+        emergency_level = self.extract_frame_emergency_level(results_list)
+        return annotated, emergency_level

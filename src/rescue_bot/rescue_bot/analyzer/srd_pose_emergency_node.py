@@ -1,6 +1,6 @@
 # v0.610
 """
-SRD Pose Severity ROS2 Node
+SRD Pose Emergency ROS2 Node
 ===========================
 
 이 파일은 실제 TurtleBot4 환경에서 사용하는 ROS2 노드 파일이다.
@@ -8,11 +8,11 @@ SRD Pose Severity ROS2 Node
 
 1) compressed image 토픽을 구독한다.
 2) JPEG 이미지를 OpenCV 프레임으로 디코딩한다.
-3) PoseSeverityEngine을 호출한다.
-4) 분석 결과(단일 severity string)와 시각화 이미지(compressed)를 publish 한다.
+3) PoseEmergencyEngine을 호출한다.
+4) 분석 결과(단일 emergency_level string)와 시각화 이미지(compressed)를 publish 한다.
 
 즉, 이 파일은 ROS2 입출력 담당이고,
-실제 포즈 분석 로직 자체는 srd_pose_severity_core.py 에 있다.
+실제 포즈 분석 로직 자체는 srd_pose_emergency_core.py 에 있다.
 """
 from typing import List
 
@@ -24,13 +24,13 @@ from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 
 try:
-    from .srd_pose_severity_core import AnalyzerConfig, PoseSeverityEngine
+    from .srd_pose_emergency_core import AnalyzerConfig, PoseEmergencyEngine
 except ImportError:
-    from srd_pose_severity_core import AnalyzerConfig, PoseSeverityEngine
+    from srd_pose_emergency_core import AnalyzerConfig, PoseEmergencyEngine
 
 
-class SrdPoseSeverityNode(Node):
-    """SRD Pose Severity ROS2 Node.
+class SrdPoseEmergencyNode(Node):
+    """SRD Pose Emergency ROS2 Node.
 
     구독 토픽:
     - input_image_topic (CompressedImage)
@@ -41,7 +41,7 @@ class SrdPoseSeverityNode(Node):
     """
 
     def __init__(self):
-        super().__init__("srd_pose_severity_node")
+        super().__init__("srd_pose_emergency_node")
 
         # --------------------------------------------------------------
         # ROS2 파라미터 선언
@@ -49,15 +49,15 @@ class SrdPoseSeverityNode(Node):
         # --------------------------------------------------------------
         self.declare_parameter("model_path", "yolo11n-pose.pt")
         self.declare_parameter("input_image_topic", "/camera/image_raw/compressed")
-        # 최종 severity 문자열 publish 토픽
-        self.declare_parameter("severity_topic", "/robot6/srd/severity")
+        # 최종 emergency_level 문자열 publish 토픽
+        self.declare_parameter("emergency_level_topic", "/robot6/srd/emergency_level")
         self.declare_parameter("image_result_topic", "/robot6/srd/image_result/compressed")
         self.declare_parameter("publish_annotated", True)
         self.declare_parameter("show_debug", True)
 
         model_path = self.get_parameter("model_path").get_parameter_value().string_value
         input_image_topic = self.get_parameter("input_image_topic").get_parameter_value().string_value
-        severity_topic = self.get_parameter("severity_topic").get_parameter_value().string_value
+        emergency_level_topic = self.get_parameter("emergency_level_topic").get_parameter_value().string_value
         image_result_topic = self.get_parameter("image_result_topic").get_parameter_value().string_value
         self.publish_annotated = self.get_parameter("publish_annotated").get_parameter_value().bool_value
         show_debug = self.get_parameter("show_debug").get_parameter_value().bool_value
@@ -66,12 +66,12 @@ class SrdPoseSeverityNode(Node):
         # 분석 코어 설정 / 생성
         # --------------------------------------------------------------
         cfg = AnalyzerConfig(model_path=model_path, show_debug=show_debug)
-        self.engine = PoseSeverityEngine(cfg)
+        self.engine = PoseEmergencyEngine(cfg)
 
         # --------------------------------------------------------------
         # Publisher / Subscriber 생성
         # --------------------------------------------------------------
-        self.severity_pub = self.create_publisher(String, severity_topic, 10)
+        self.emergency_level_pub = self.create_publisher(String, emergency_level_topic, 10)
         self.image_result_pub = self.create_publisher(CompressedImage, image_result_topic, 10)
 
         self.image_sub = self.create_subscription(
@@ -82,7 +82,7 @@ class SrdPoseSeverityNode(Node):
         )
 
         self.get_logger().info(
-            f"SRD Pose Severity Node started. input={input_image_topic}, severity={severity_topic}, annotated={image_result_topic}"
+            f"SRD Pose Emergency Node started. input={input_image_topic}, emergency_level={emergency_level_topic}, annotated={image_result_topic}"
         )
 
     # ------------------------------------------------------------------
@@ -120,14 +120,14 @@ class SrdPoseSeverityNode(Node):
             frame = self._decode_compressed_image(msg)
 
             # 2) 분석 코어 호출
-            annotated, severity = self.engine.analyze_frame_with_severity(frame)
+            annotated, emergency_level = self.engine.analyze_frame_with_emergency_level(frame)
 
-            # 3) 최종 severity 하나만 publish
+            # 3) 최종 emergency_level 하나만 publish
             # 사람이 검출되지 않은 프레임은 운영 의미가 약하므로 publish 생략
-            if severity is not None:
-                sev_msg = String()
-                sev_msg.data = severity
-                self.severity_pub.publish(sev_msg)
+            if emergency_level is not None:
+                em_msg = String()
+                em_msg.data = emergency_level
+                self.emergency_level_pub.publish(em_msg)
 
             # 4) 필요 시 annotated image도 compressed로 발행
             if self.publish_annotated:
@@ -140,7 +140,7 @@ class SrdPoseSeverityNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = SrdPoseSeverityNode()
+    node = SrdPoseEmergencyNode()
     try:
         rclpy.spin(node)
     finally:

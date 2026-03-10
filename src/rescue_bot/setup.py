@@ -27,8 +27,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'analyzer = rescue_bot.analyzer.srd_advanced_analyzer:main',
             'database = rescue_bot.database.srd_database_node:main',
+            'srd_pose_emergency_node = rescue_bot.analyzer.srd_pose_emergency_node:main',
         ],
     },
 )
