@@ -30,17 +30,17 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PointStamped, Twist
+from geometry_msgs.msg import PointStamped, PoseStamped, Twist
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
-from sensor_msgs.msg import CameraInfo, CompressedImage
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 from std_msgs.msg import Bool, String
+from cv_bridge import CvBridge
 from tf2_ros import Buffer, TransformListener
-
 try:
     from .rescue_vision_core import AnalyzerConfig, PoseEmergencyEngine
 except ImportError:
@@ -59,8 +59,8 @@ class Robot6ControlNode(Node):
         # ROS2 parameters
         # ------------------------------------------------------------------
         self.declare_parameter("model_path", "yolo11n-pose.pt")
-        self.declare_parameter("rgb_topic", "/robot6/oakd/rgb/image_raw/compressed")
-        self.declare_parameter("depth_topic", "/robot6/oakd/stereo/image_raw/compressedDepth")
+        self.declare_parameter("rgb_topic", "/robot6/oakd/rgb/preview/image_raw")
+        self.declare_parameter("depth_topic", "/robot6/oakd/stereo/image_raw")
         self.declare_parameter("camera_info_topic", "/robot6/oakd/stereo/camera_info")
         self.declare_parameter("arrived_topic", "/robot6/mission/arrived")
         self.declare_parameter("tts_done_topic", "/robot6/tts/done")
@@ -68,21 +68,22 @@ class Robot6ControlNode(Node):
         self.declare_parameter("result_topic", "/robot6/session/result")
         self.declare_parameter("status_topic", "/robot6/session/status")
         self.declare_parameter("tts_req_topic", "/robot6/tts/request")
-        self.declare_parameter("image_result_topic", "/robot6/srd/image_result/compressed")
+        self.declare_parameter("image_result_topic", "/robot6/image_result")
+        self.declare_parameter("victim_pose_topic", "/rescue/victim_pose_stamped")
         self.declare_parameter("timer_period_sec", 0.10)
         self.declare_parameter("publish_annotated", True)
         self.declare_parameter("show_debug", True)
 
-        self.declare_parameter("center_tol_px", 40)
-        self.declare_parameter("edge_margin_px", 20)
+        self.declare_parameter("center_tol_px", 100)
+        self.declare_parameter("edge_margin_px", 5)
         self.declare_parameter("verify_n", 10)
-        self.declare_parameter("measure_min_sec", 3.0)
-        self.declare_parameter("measure_min_stable_frames", 30)
+        self.declare_parameter("measure_min_sec", 10.0)
+        self.declare_parameter("measure_min_stable_frames", 50)
         self.declare_parameter("yaw_kp", 0.002)
         self.declare_parameter("max_yaw_speed", 0.5)
         self.declare_parameter("search_yaw_speed", 0.10)
         self.declare_parameter("backoff_speed", -0.05)
-        self.declare_parameter("backoff_h_ratio", 0.82)
+        self.declare_parameter("backoff_h_ratio", 0.95)
         self.declare_parameter("backoff_w_ratio", 0.72)
         self.declare_parameter("depth_too_close_m", 0.90)
         self.declare_parameter("target_lost_timeout_sec", 0.50)
@@ -101,6 +102,7 @@ class Robot6ControlNode(Node):
         status_topic = str(self.get_parameter("status_topic").value)
         tts_req_topic = str(self.get_parameter("tts_req_topic").value)
         image_result_topic = str(self.get_parameter("image_result_topic").value)
+        victim_pose_topic = str(self.get_parameter("victim_pose_topic").value)
         self.timer_period_sec = float(self.get_parameter("timer_period_sec").value)
         self.publish_annotated = bool(self.get_parameter("publish_annotated").value)
         show_debug = bool(self.get_parameter("show_debug").value)
@@ -142,9 +144,9 @@ class Robot6ControlNode(Node):
         # ------------------------------------------------------------------
         # Latest sensor cache (raw bytes only)
         # ------------------------------------------------------------------
-        self.latest_rgb_bytes: Optional[bytes] = None
+        self.latest_rgb_msg: Optional[Image] = None
         self.latest_rgb_stamp = None
-        self.latest_depth_bytes: Optional[bytes] = None
+        self.latest_depth_msg: Optional[Image] = None
         self.latest_depth_frame_id: Optional[str] = None
         self.K: Optional[np.ndarray] = None
 
@@ -156,12 +158,15 @@ class Robot6ControlNode(Node):
         self.session_start_t: Optional[float] = None
         self.session_start_iso: Optional[str] = None
         self.measure_start_t: Optional[float] = None
+        self.last_target_x = 320
         self.measure_end_t: Optional[float] = None
 
         self.session_active = False
         self.result_locked = False
         self.tts_requested = False
         self.tts_done = False
+        self.framing_forced = False
+        self.state_start_t = time.time()
 
         self.current_track_id: Optional[int] = None
         self.current_target: Optional[Dict[str, Any]] = None
@@ -173,6 +178,7 @@ class Robot6ControlNode(Node):
         self.stable_frame_count = 0
         self.low_conf_count = 0
         self.no_person_count = 0
+        self.framing_forced = False
 
         self.bucket_overall: List[Dict[str, Any]] = []
         self.bucket_full_body: List[Dict[str, Any]] = []
@@ -185,6 +191,7 @@ class Robot6ControlNode(Node):
 
         self.result_snapshot: Optional[Dict[str, Any]] = None
         self.last_annotated: Optional[np.ndarray] = None
+        self.bridge = CvBridge()
 
         # ------------------------------------------------------------------
         # ROS pubs/subs/timer
@@ -193,7 +200,9 @@ class Robot6ControlNode(Node):
         self.result_pub = self.create_publisher(String, result_topic, 10)
         self.status_pub = self.create_publisher(String, status_topic, 10)
         self.tts_req_pub = self.create_publisher(String, tts_req_topic, 10)
-        self.image_pub = self.create_publisher(CompressedImage, image_result_topic, 10)
+        self.image_pub = self.create_publisher(Image, image_result_topic, 10)
+        self.image_compressed_pub = self.create_publisher(CompressedImage, image_result_topic + "/compressed", 10)
+        self.victim_pose_pub = self.create_publisher(PoseStamped, victim_pose_topic, 10)
 
         self.create_subscription(
             Bool,
@@ -217,14 +226,14 @@ class Robot6ControlNode(Node):
             callback_group=self.sensor_group,
         )
         self.create_subscription(
-            CompressedImage,
+            Image,
             depth_topic,
             self.depth_callback,
             qos_profile_sensor_data,
             callback_group=self.sensor_group,
         )
         self.create_subscription(
-            CompressedImage,
+            Image,
             rgb_topic,
             self.rgb_callback,
             qos_profile_sensor_data,
@@ -238,18 +247,21 @@ class Robot6ControlNode(Node):
     # ROS callbacks
     # ------------------------------------------------------------------
     def arrived_callback(self, msg: Bool) -> None:
+        self.get_logger().info(f"Received Arrived signal: {msg.data}")
         if not msg.data:
             return
         if self.state != "WAIT_ARRIVAL":
+            self.get_logger().warn(f"Ignoring Arrived signal. Current state is {self.state}, not WAIT_ARRIVAL")
             return
 
+        self.get_logger().info(">>> SESSION STARTING: Target Arrived successfully! <<<")
         self.reset_session()
         self.session_id = self._make_session_id()
         self.session_start_t = time.time()
         self.session_start_iso = datetime.now().isoformat(timespec="seconds")
         self.session_active = True
         self.state = "SEARCH_PERSON"
-        self.get_logger().info(f"session start: {self.session_id}")
+        self.get_logger().info(f"Created Session ID: {self.session_id}")
 
     def tts_done_callback(self, msg: Bool) -> None:
         if msg.data and self.state == "WAIT_TTS_DONE":
@@ -260,14 +272,14 @@ class Robot6ControlNode(Node):
         with self.sensor_lock:
             self.K = np.array(msg.k, dtype=np.float32).reshape(3, 3)
 
-    def rgb_callback(self, msg: CompressedImage) -> None:
+    def rgb_callback(self, msg: Image) -> None:
         with self.sensor_lock:
-            self.latest_rgb_bytes = bytes(msg.data)
+            self.latest_rgb_msg = msg
             self.latest_rgb_stamp = msg.header.stamp
 
-    def depth_callback(self, msg: CompressedImage) -> None:
+    def depth_callback(self, msg: Image) -> None:
         with self.sensor_lock:
-            self.latest_depth_bytes = bytes(msg.data)
+            self.latest_depth_msg = msg
             self.latest_depth_frame_id = msg.header.frame_id
 
     # ------------------------------------------------------------------
@@ -275,16 +287,22 @@ class Robot6ControlNode(Node):
     # ------------------------------------------------------------------
     def step(self) -> None:
         try:
-            if self.state == "WAIT_ARRIVAL":
-                self.stop_motion()
-                self._publish_status()
-                return
-
+            # 1. 센서 데이터 스냅샷 가져오기 (항상 수행)
             snapshot = self._get_sensor_snapshot()
+            
+            # 주기적인 상태 로그 (데이터가 없어도 현재 상태 확인 가능하게)
+            now_t = time.time()
+            if not hasattr(self, '_last_state_log_t'): self._last_state_log_t = 0
+            if (now_t - self._last_state_log_t) > 2.0:
+                self.get_logger().info(f"[Step] Current State: {self.state} | Person In View: {self.current_target is not None}")
+                self._last_state_log_t = now_t
+
             if snapshot is None:
                 self._publish_status()
                 return
 
+            # 2. YOLO 분석 및 타겟팅 (항상 수행 - Always-on Video)
+            # WAIT_TTS_DONE이나 SESSION_END 상태일 때는 이전 어노테이션 유지하거나 원본 출력
             if self.state in ("WAIT_TTS_DONE", "SESSION_END"):
                 annotated = self.last_annotated if self.last_annotated is not None else snapshot["rgb"]
                 target = None
@@ -293,9 +311,14 @@ class Robot6ControlNode(Node):
                 self.last_annotated = annotated.copy()
                 target = self._select_target(results, snapshot["rgb"].shape)
                 self.current_target = target
-                self._update_tracking_bookkeeping(target)
+                # 주행 중(WAIT_ARRIVAL)에는 트래킹 북키핑 생략하여 노이즈 방지 가능
+                if self.state != "WAIT_ARRIVAL":
+                    self._update_tracking_bookkeeping(target)
 
-            if self.state == "SEARCH_PERSON":
+            # 3. 상태별 로직 처리
+            if self.state == "WAIT_ARRIVAL":
+                self.stop_motion()
+            elif self.state == "SEARCH_PERSON":
                 self._handle_search_person(target)
             elif self.state == "FRAME_PERSON":
                 self._handle_frame_person(target, snapshot)
@@ -311,6 +334,7 @@ class Robot6ControlNode(Node):
                 self._publish_final_result()
                 self.reset_session()
 
+            # 4. 상태 및 영상 퍼블리시 (항상 수행)
             self._publish_status()
             if self.publish_annotated:
                 self._publish_annotated(annotated, snapshot.get("rgb_stamp"))
@@ -342,12 +366,23 @@ class Robot6ControlNode(Node):
             self.state = "SEARCH_PERSON"
             return
 
+        # 프레이밍 타임아웃 (10초 이상 조준 실패 시 강제 진행)
+        if (now - self.state_start_t) > 10.0:
+            self.get_logger().warn("Framing timeout reached (10s). Forcing transition to VERIFY_FRAME with framing_forced=True.")
+            self.framing_forced = True
+            self.stop_motion()
+            self.verify_ok_count = 0
+            self.state = "VERIFY_FRAME"
+            self.state_start_t = now
+            return
+
         action = self._decide_frame_action(target, snapshot)
         if action == "SEARCH":
             if self._target_recently_seen(now):
                 self.stop_motion()
             else:
                 self.state = "SEARCH_PERSON"
+                self.state_start_t = now
         elif action == "YAW_ALIGN":
             self.cmd_vel_pub.publish(self._make_yaw_cmd(target, snapshot["rgb"].shape[1]))
         elif action == "BACKOFF":
@@ -356,6 +391,7 @@ class Robot6ControlNode(Node):
             self.stop_motion()
             self.verify_ok_count = 0
             self.state = "VERIFY_FRAME"
+            self.state_start_t = now
 
     def _handle_verify_frame(self, target: Optional[Dict[str, Any]], snapshot: Dict[str, Any]) -> None:
         now = time.time()
@@ -367,11 +403,11 @@ class Robot6ControlNode(Node):
             self.state = "SEARCH_PERSON"
             return
 
-        if self._decide_frame_action(target, snapshot) != "HOLD":
+        if not self.framing_forced and self._decide_frame_action(target, snapshot) != "HOLD":
             self.verify_ok_count = 0
+            # FRAME_PERSON으로 돌아가더라도 timer를 reset하지 않음 (전체 framing timeout 10s 유지)
             self.state = "FRAME_PERSON"
             return
-
         self.verify_ok_count += 1
         self.stop_motion()
         if self.verify_ok_count >= self.VERIFY_N:
@@ -387,9 +423,11 @@ class Robot6ControlNode(Node):
                 self.stop_motion()
                 return
             self.state = "SEARCH_PERSON"
+            self.state_start_t = now
             return
 
-        if self._decide_frame_action(target, snapshot) != "HOLD":
+        if not self.framing_forced and self._decide_frame_action(target, snapshot) != "HOLD":
+            # MEASURING 중이라도 Jitter 발생 시 돌아가되 timer reset 안함
             self.state = "FRAME_PERSON"
             return
 
@@ -402,6 +440,7 @@ class Robot6ControlNode(Node):
             (now - self.measure_start_t) >= self.MEASURE_MIN_SEC
             and self.stable_frame_count >= self.MEASURE_MIN_STABLE_FRAMES
         ):
+            self.get_logger().info("Analysis finished. Locking results...")
             self.measure_end_t = now
             self.state = "RESULT_LOCKED"
 
@@ -410,18 +449,21 @@ class Robot6ControlNode(Node):
         if self.result_snapshot is None:
             self.result_snapshot = self.build_session_result()
             self.result_locked = True
+            
+            # Fix KeyError: 'observation' -> access via nested structure
+            obs_majority = self.result_snapshot.get("overall", {}).get("dominant_observation", "UNKNOWN")
+            self.get_logger().info(f"Result locked: Dominant Observation = {obs_majority}")
 
         if not self.tts_requested:
+            # STT Node expects a simple uppercase status string (e.g. "CRITICAL")
+            # fallback to "NORMAL" only if data is truly missing
+            overall = self.result_snapshot.get("overall", {})
+            peak = overall.get("emergency_peak")
+            status_to_send = str(peak if peak else "NORMAL").upper()
+            
+            self.get_logger().info(f"Requesting TTS announcement with status: {status_to_send}")
             msg = String()
-            msg.data = json.dumps(
-                {
-                    "session_id": self.session_id,
-                    "robot_id": self.robot_id,
-                    "tts_text": self._build_tts_text(self.result_snapshot),
-                    "result": self.result_snapshot,
-                },
-                ensure_ascii=False,
-            )
+            msg.data = status_to_send
             self.tts_req_pub.publish(msg)
             self.tts_requested = True
 
@@ -432,44 +474,44 @@ class Robot6ControlNode(Node):
     # ------------------------------------------------------------------
     def _get_sensor_snapshot(self) -> Optional[Dict[str, Any]]:
         with self.sensor_lock:
-            rgb_bytes = self.latest_rgb_bytes
+            rgb_msg = self.latest_rgb_msg
             rgb_stamp = self.latest_rgb_stamp
-            depth_bytes = self.latest_depth_bytes
+            depth_msg = self.latest_depth_msg
             frame_id = self.latest_depth_frame_id
             K = None if self.K is None else self.K.copy()
 
-        if rgb_bytes is None:
+        if rgb_msg is None:
             return None
 
-        rgb = self._decode_rgb(rgb_bytes)
+        rgb = self._decode_rgb(rgb_msg)
         if rgb is None:
             return None
 
-        depth = self._decode_depth(depth_bytes) if depth_bytes is not None else None
+        depth = self._decode_depth(depth_msg)
         return {
             "rgb": rgb,
             "rgb_stamp": rgb_stamp,
             "depth": depth,
-            "frame_id": frame_id,
+            "depth_frame_id": frame_id,
             "K": K,
         }
 
-    @staticmethod
-    def _decode_rgb(raw_bytes: bytes) -> Optional[np.ndarray]:
-        np_arr = np.frombuffer(raw_bytes, np.uint8)
-        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        return frame
-
-    @staticmethod
-    def _decode_depth(raw_bytes: bytes) -> Optional[np.ndarray]:
-        if raw_bytes is None:
+    def _decode_rgb(self, msg: Image) -> Optional[np.ndarray]:
+        try:
+            return self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        except Exception as exc:
+            self.get_logger().error(f"decode_rgb failed: {exc}")
             return None
-        np_arr = np.frombuffer(raw_bytes, np.uint8)
-        if len(np_arr) > 12:
-            depth = cv2.imdecode(np_arr[12:], cv2.IMREAD_UNCHANGED)
-        else:
-            depth = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
-        return depth
+
+    def _decode_depth(self, msg: Optional[Image]) -> Optional[np.ndarray]:
+        if msg is None:
+            return None
+        try:
+            # Ignition Gazebo bridges depth as 32FC1 (meters)
+            return self.bridge.imgmsg_to_cv2(msg, desired_encoding="32FC1")
+        except Exception as exc:
+            self.get_logger().error(f"decode_depth failed: {exc}")
+            return None
 
     # ------------------------------------------------------------------
     # Target selection / tracking bookkeeping
@@ -660,12 +702,20 @@ class Robot6ControlNode(Node):
 
     def _estimate_target_depth(self, target: Dict[str, Any], snapshot: Dict[str, Any]) -> Optional[float]:
         depth = snapshot.get("depth")
-        if depth is None:
+        rgb = snapshot.get("rgb")
+        if depth is None or rgb is None:
             return None
         u, v, _ = self._select_position_pixel(target)
         if u is None or v is None:
             return None
-        return self.sample_depth(depth, int(u), int(v))
+
+        # RGB와 Depth 해상도가 다를 경우 좌표 스케일링 (실기체 대응)
+        rgb_h, rgb_w = rgb.shape[:2]
+        depth_h, depth_w = depth.shape[:2]
+        u_scaled = u * (depth_w / rgb_w)
+        v_scaled = v * (depth_h / rgb_h)
+
+        return self.sample_depth(depth, int(u_scaled), int(v_scaled))
 
     def _select_position_pixel(self, target: Dict[str, Any]) -> Tuple[Optional[int], Optional[int], Optional[str]]:
         # 1) core가 준 대표점이 있으면 최우선 사용
@@ -721,7 +771,17 @@ class Robot6ControlNode(Node):
         if u is None or v is None or method is None:
             return None
 
-        z = self.sample_depth(depth, int(u), int(v))
+        # RGB와 Depth 해상도가 다를 경우 좌표 스케일링 (실기체 대응)
+        rgb = snapshot.get("rgb")
+        if rgb is not None:
+            rgb_h, rgb_w = rgb.shape[:2]
+            depth_h, depth_w = depth.shape[:2]
+            u_scaled = u * (depth_w / rgb_w)
+            v_scaled = v * (depth_h / rgb_h)
+        else:
+            u_scaled, v_scaled = u, v
+
+        z = self.sample_depth(depth, int(u_scaled), int(v_scaled))
         if z is None:
             return None
 
@@ -912,12 +972,40 @@ class Robot6ControlNode(Node):
     # ------------------------------------------------------------------
     # Publish helpers
     # ------------------------------------------------------------------
+    # 결과 발행 기능 (JSON 리포트 및 네비게이션용 PoseStamped)
+    # ------------------------------------------------------------------
     def _publish_final_result(self) -> None:
         if self.result_snapshot is None:
             return
+
+        # 1. 전체 JSON 리포트 발행
+        self.get_logger().info("최종 미션 리포트를 발행합니다...")
         msg = String()
         msg.data = json.dumps(self.result_snapshot, ensure_ascii=False)
         self.result_pub.publish(msg)
+        self.get_logger().info("JSON 리포트 전송 완료.")
+
+        # 2. 요구조자 위치(PoseStamped) 발행 (네비게이션 노드 연동용)
+        v_pos = self.result_snapshot.get("victim_position", {})
+        vx = v_pos.get("x")
+        vy = v_pos.get("y")
+        vz = v_pos.get("z", 0.0)
+
+        if vx is not None and vy is not None:
+            self.get_logger().info(f"요구조자 위치를 발행합니다: x={vx}, y={vy}")
+            pose_msg = PoseStamped()
+            pose_msg.header.stamp = self.get_clock().now().to_msg()
+            pose_msg.header.frame_id = "map"
+            pose_msg.pose.position.x = float(vx)
+            pose_msg.pose.position.y = float(vy)
+            pose_msg.pose.position.z = float(vz)
+            # 회전값은 기본값(정면)으로 설정
+            pose_msg.pose.orientation.w = 1.0
+            
+            self.victim_pose_pub.publish(pose_msg)
+            self.get_logger().info("요구조자 위치(PoseStamped) 발행 완료.")
+        else:
+            self.get_logger().warn("요구조자 좌표를 찾을 수 없어 PoseStamped를 발행하지 않습니다.")
 
     def _publish_status(self) -> None:
         payload = {
@@ -932,15 +1020,30 @@ class Robot6ControlNode(Node):
         self.status_pub.publish(msg)
 
     def _publish_annotated(self, frame: np.ndarray, stamp=None) -> None:
-        ok, encoded = cv2.imencode(".jpg", frame)
-        if not ok:
-            return
-        msg = CompressedImage()
-        if stamp is not None:
-            msg.header.stamp = stamp
-        msg.format = "jpeg"
-        msg.data = encoded.tobytes()
-        self.image_pub.publish(msg)
+        try:
+            if stamp:
+                ros_stamp = stamp
+            else:
+                ros_stamp = self.get_clock().now().to_msg()
+
+            # 1. Raw Image Publish (for RQT)
+            raw_msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+            raw_msg.header.stamp = ros_stamp
+            raw_msg.header.frame_id = "oakd_rgb_camera_optical_frame"
+            self.image_pub.publish(raw_msg)
+
+            # 2. Compressed Image Publish (for Web/Efficiency)
+            comp_msg = CompressedImage()
+            comp_msg.header.stamp = ros_stamp
+            comp_msg.header.frame_id = "oakd_rgb_camera_optical_frame"
+            comp_msg.format = "jpeg"
+            success, encoded_image = cv2.imencode(".jpg", frame)
+            if success:
+                comp_msg.data = encoded_image.tobytes()
+                self.image_compressed_pub.publish(comp_msg)
+
+        except Exception as exc:
+            self.get_logger().error(f"failed to publish image: {exc}")
 
     # ------------------------------------------------------------------
     # Session helpers
@@ -968,6 +1071,12 @@ class Robot6ControlNode(Node):
         self.result_locked = False
         self.tts_requested = False
         self.tts_done = False
+        self.framing_forced = False
+        self.state_start_t = time.time()
+        
+        self.get_logger().info('[Reset] Session has been reset. Ready for next target.')
+
+        self.get_logger().info("Session reset. Waiting for next target arrival...")
 
         self.current_track_id = None
         self.current_target = None
@@ -990,6 +1099,7 @@ class Robot6ControlNode(Node):
         self.valid_position_samples = 0
 
         self.result_snapshot = None
+        self.bridge = CvBridge()
         self.last_annotated = None
 
 
