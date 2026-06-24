@@ -87,8 +87,6 @@ source install/setup.bash
 5. `rescue_stt_node`가 대화 시나리오를 수행하고 `/robot6/tts/done`을 발행합니다.
 6. `rescue_nav_node`가 다음 목표 또는 도킹 단계로 진행합니다.
 
-자세한 계약은 [src/rescue_bot/docs/robot6_runtime_contract.md](/home/gom/rokey_ws/src/rescue_bot/docs/robot6_runtime_contract.md) 를 참고하면 됩니다.
-
 ## Python Requirements
 
 공용 Python 패키지는 루트 [requirements.txt](/home/gom/rokey_ws/requirements.txt) 에 정리했습니다.
